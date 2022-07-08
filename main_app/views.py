@@ -1,10 +1,19 @@
 from django.shortcuts import render, redirect
+from django.contrib.auth.decorators import login_required
 from django.views.generic.edit import CreateView, UpdateView, DeleteView
 from django.views.generic import ListView
 from django.views.generic.detail import DetailView
-from .models import Cat, Toy
+from .models import Cat, Toy, Photo
 from .forms import FeedingForm
+from django.contrib.auth import login
+from django.contrib.auth.forms import UserCreationForm
 
+import uuid
+import boto3
+
+
+S3_BASE_URL = 'https://s3.us-east-1.amazonaws.com/'
+BUCKET = 'cat-collector-eric-avatar'
 # Create your views here.
 
 # def home(request):
@@ -21,18 +30,23 @@ def home(request):
 def about(request):
   return render(request, 'about.html')
 
+@login_required
 def cats_index(request):
-  cats = Cat.objects.all()
+  cats = Cat.objects.filter(user=request.user)
   return render(request, 'cats/index.html', { 'cats': cats })
 
+@login_required
 def cats_detail(request, cat_id):
   cat = Cat.objects.get(id=cat_id)
+  toys_cat_doesnt_have = Toy.objects.exclude(id__in = cat.toys.all().values_list('id'))
   feeding_form = FeedingForm()
   return render(request, 'cats/detail.html', {
     # include the cat and feeding_form in the context
-    'cat': cat, 'feeding_form': feeding_form
+    'cat': cat, 'feeding_form': feeding_form,
+    'toys': toys_cat_doesnt_have
   })
 
+@login_required
 def add_feeding(request, cat_id):
   # create the ModelForm using the data in request.POST
   form = FeedingForm(request.POST)
@@ -45,11 +59,54 @@ def add_feeding(request, cat_id):
     new_feeding.save()
   return redirect('detail', cat_id=cat_id)
 
+@login_required
+def assoc_toy(request, cat_id, toy_id):
+  Cat.objects.get(id=cat_id).toys.add(toy_id)
+  return redirect('detail', cat_id=cat_id)
+
+@login_required
+def assoc_toy_remove(request, cat_id, toy_id):
+  Cat.objects.get(id=cat_id).toys.remove(toy_id)
+  return redirect('detail', cat_id=cat_id)
+
+@login_required
+def add_photo(request, cat_id):
+  photo_file = request.FILES.get('photo-file', None)
+  if photo_file:
+    s3 = boto3.client('s3')
+    key = uuid.uuid4().hex[:6] + photo_file.name[photo_file.name.rfind('.'):]
+    try:
+      s3.upload_fileobj(photo_file, BUCKET, key)
+      url = f"{S3_BASE_URL}{BUCKET}/{key}"
+      photo = Photo(url=url, cat_id=cat_id)
+      photo.save()
+    except Exception as error:
+      print("Error uploading photo: ", error)
+      return redirect('detail', cat_id=cat_id)
+  return redirect('detail', cat_id=cat_id)
+
+def signup(request):
+  error_messages = ''
+  if request.method == 'POST':
+    form = UserCreationForm(request.POST)
+    if form.is_valid():
+      user = form.save()
+      login(request, user)
+      return redirect('index')
+    else:
+      error_messages = 'Invalid sign up - try again'
+  form = UserCreationForm()
+  context = {'form': form, 'error_messages': error_messages}
+  return render(request, 'registration/signup.html', context)
 
 class CatCreate(CreateView):
   model = Cat
-  fields = '__all__'
+  fields = ['name', 'breed', 'description', 'age']
   success_url = '/cats/'
+
+  def form_valid(self, form): 
+    form.instance.user = self.request.user
+    return super().form_valid(form)
 
 class CatUpdate(UpdateView):
   model = Cat
